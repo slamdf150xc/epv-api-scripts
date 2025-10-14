@@ -1,13 +1,12 @@
 [CmdletBinding()]
-param
-(
+param (
     [Parameter(Mandatory = $false)]
-    [ValidatePattern( '\.csv$' )]
+    [ValidatePattern('\.csv$')]
     [Alias("Report")]
     [String]$ReportPath = ".\SafeMemberReport.csv",
 
     [Parameter(Mandatory = $false)]
-    [array]$UserTypes =  @("EPVUser", "BasicUser"),
+    [array]$UserTypes = @("EPVUser", "BasicUser"),
 
     [Parameter(Mandatory = $false)]
     [Switch]$ExcludeUsers,
@@ -27,138 +26,246 @@ param
     [Parameter(Mandatory = $false)]
     $PermList,
 
-    #region Parameters used for logon
-    [Parameter(Mandatory = $false, HelpMessage = "Use this parameter to pass a pre-existing authorization token. ")]
+    [Parameter(Mandatory = $false)]
     $logonToken,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Enter Identity Name")]
+    [Parameter(Mandatory = $false)]
     [String]$IdentityUserName,
-    [Parameter(Mandatory = $false, HelpMessage = "Enter Identity URL")]
+
+    [Parameter(Mandatory = $false)]
     [String]$IdentityURL,
-    [Parameter(Mandatory = $false, HelpMessage = "Enter Privilege Cloud Subdomain")]
+
+    [Parameter(Mandatory = $false)]
     [String]$PCloudSubDomain,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Enter PVWA URL")]
+    [Parameter(Mandatory = $false)]
     [String]$PVWAAddress,
-    [Parameter(Mandatory = $false, HelpMessage = "Pass PVWA Credentials")]
-    [PSCredential]$PVWACredentials,
-    [Parameter(Mandatory = $false, HelpMessage = "Authentication Type for PVWA")]
-    [String]$PVWAAuthType = "CyberArk"
-    #endregion
 
+    [Parameter(Mandatory = $false)]
+    [PSCredential]$PVWACredentials,
+
+    [Parameter(Mandatory = $false)]
+    [String]$PVWAAuthType = "CyberArk"
 )
-#region PAS Connection
-if (!(Get-Module -ListAvailable -Name PSPAS)) {
-    Try {
-    Install-Module PSPAS -Scope CurrentUser
-    } catch
-    {
-        "PSPas was not found and unable to automatically install the module. Please manually install the module and try again."
+
+function Log {
+    param(
+        [string]$Msg,
+        [ValidateSet("INFO","SUCCESS","WARNING","ERROR","FATAL")]
+        [string]$Level = "INFO",
+        [bool]$NoNewLine = $false
+    )
+    switch ($Level) {
+        "INFO"    { $color = "White" }
+        "SUCCESS" { $color = "Green" }
+        "WARNING" { $color = "Yellow" }
+        "ERROR"   { $color = "Red" }
+        "FATAL"   { $color = "Magenta" }        
+        default   { $color = "Gray" }
     }
-} 
+    if ($NoNewLine) {
+        Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Msg" -ForegroundColor $color -NoNewline
+    } else {
+        Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Msg" -ForegroundColor $color
+    }
+}
+
+Log "Checking for PSPAS module..." "INFO" $true
+if (!(Get-Module -ListAvailable -Name PSPAS)) {
+    try {
+        Write-Host ""
+        Install-Module PSPAS -Scope CurrentUser -Force
+        Log "PSPAS module installed successfully." "SUCCESS"
+    } catch {
+        Write-Host ""
+        Log "PSPAS module not found and could not be installed. Please install manually." "ERROR"
+        exit
+    }
+} else {
+    Write-Host "Done" -ForegroundColor Green
+}
 
 Get-PASComponentSummary -ErrorAction SilentlyContinue -ErrorVariable TestConnect | Out-Null
-if ($TestConnect.count -ne 0) {
+if ($TestConnect.Count -ne 0) {
     Close-PASSession -ErrorAction SilentlyContinue
 }
-If ($null -eq (Get-PASSession).User){
-    If (![string]::IsNullOrEmpty($logonToken)){
-        Use-PASSession $logonToken 
-    }
-    elseIf (![string]::IsNullOrEmpty($IdentityUserName)) {
-        "Identity username provided"  
-        IF (!(Test-Path .\IdentityAuth.psm1)){
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/cyberark/epv-api-scripts/main/Identity%20Authentication/IdentityAuth.psm1 -OutFile IdentityAuth.psm1
+
+If ($null -eq (Get-PASSession).User) {
+    if (![string]::IsNullOrEmpty($logonToken)) {
+        Log "Using provided logon token..." "INFO"
+        Use-PASSession $logonToken
+    } elseif (![string]::IsNullOrEmpty($IdentityUserName)) {
+        Log "Performing Identity-based authentication..." "INFO"
+        if (!(Test-Path .\IdentityAuth.psm1)) {
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/cyberark/epv-api-scripts/main/Identity%20Authentication/IdentityAuth.psm1" -OutFile "IdentityAuth.psm1"
         }
         Import-Module .\IdentityAuth.psm1
         $header = Get-IdentityHeader -psPASFormat -IdentityTenantURL $IdentityURL -IdentityUserName $IdentityUserName -PCloudTenantAPIURL "https://$PCloudSubDomain.privilegecloud.cyberark.cloud/passwordvault/"
         if ($null -eq $header) {
+            Log "Identity authentication failed." "ERROR"
             exit
         }
         Use-PASSession $header
-        "Successfully Connected"
-    } elseif (![string]::IsNullOrEmpty($PVWAAddress)){
+        Log "Successfully connected via Identity." "SUCCESS"
+    } elseif (![string]::IsNullOrEmpty($PVWAAddress)) {
         if ([string]::IsNullOrEmpty($PVWACredentials)) {
             $PVWACredentials = Get-Credential
         }
-        New-PASSession -Credential $PVWACredentials -concurrentSession $true -BaseURI $PVWAAddress -type $PVWAAuthType
+        Log "Connecting to PVWA..." "INFO" $true
+        New-PASSession -Credential $PVWACredentials -ConcurrentSession $true -BaseURI $PVWAAddress -Type $PVWAAuthType
+        Write-Host "Done" -ForegroundColor Green
     } else {
-        "You must enter either a Logon Token, PVWAAddress, or IdentityURL and SubDomain"
-        break
+        Log "No connection parameters provided. Please specify logonToken, PVWAAddress, or IdentityURL/SubDomain." "ERROR"
+        exit
     }
 }
-#endregion
-If (!$ExcludeUsers) {
+
+if (!$ExcludeUsers) {
     $IncludedUsersTypes = $UserTypes
 }
-
-If ($IncludeApps) {
+if ($IncludeApps) {
     $IncludedUsersTypes = @("AppProvider", "AIMAccount") + $IncludedUsersTypes
 }
 
-
+Log "Retrieving Safes..." "INFO" $true
 $Safes = Get-PASSafe
-[hashtable]$safesht = @{}
-$safes | ForEach-Object {$safesht.Add($_.SafeName, $_)}
+[hashtable]$safesht = @{ }
+$Safes | ForEach-Object { $safesht.Add($_.SafeName, $_) }
+Write-Host "Done" -ForegroundColor Green
 
+Log "Retrieving Users..." "INFO" $true
 $Users = Get-PASUser
-[hashtable]$Usersht = @{}
-$Users | ForEach-Object {$Usersht.Add($_.username, $_)}
+[hashtable]$Usersht = @{ }
+$Users | ForEach-Object { $Usersht.Add($_.UserName, $_) }
+Write-Host "Done" -ForegroundColor Green
 
-$SafeMembers = $safes | Get-PASSafeMember -includePredefinedUsers $IncludePredefinedUsers -ErrorAction SilentlyContinue
-
+Log "Retrieving Safe Members..." "INFO" $true
+$SafeMembers = $Safes | Get-PASSafeMember -IncludePredefinedUsers $IncludePredefinedUsers -ErrorAction SilentlyContinue
 $SafeMembers | Add-Member -MemberType NoteProperty -Name UserInfo -Value $null -Force
 $SafeMembers | Add-Member -MemberType NoteProperty -Name SafeInfo -Value $null -Force
+$SafeMembers | ForEach-Object { $_.UserInfo = $Usersht[$_.UserName] }
+$SafeMembers | ForEach-Object { $_.SafeInfo = $safesht[$_.SafeName] }
+Write-Host "Done" -ForegroundColor Green
 
-$SafeMembers | ForEach-Object {$_.UserInfo = $Usersht[$_.UserName]}
-$SafeMembers | ForEach-Object {$_.SafeInfo = $safesht[$_.SafeName]}
-
-$SafeMembersList = $null
-
-if ($IncludeGroups){
-    $SafeMembersList = $SafeMembers | Where-Object {($_.userinfo.UserType -In $IncludedUsersTypes) -or ($_.memberType -eq "Group")}
+if ($IncludeGroups) {
+    $SafeMembersList = $SafeMembers | Where-Object { ($_.UserInfo.UserType -in $IncludedUsersTypes) -or ($_.MemberType -eq "Group") }
 } else {
-    $SafeMembersList = $SafeMembers | Where-Object {($_.userinfo.UserType -In $IncludedUsersTypes)}
+    $SafeMembersList = $SafeMembers | Where-Object { $_.UserInfo.UserType -in $IncludedUsersTypes }
 }
 
-IF ([string]::IsNullOrEmpty($SafeMembersList)){
-    Write-Warning "No safe members found, please expand search partamters and try again. Ending script"
-    Return
-}
-$props = @("Source", "UserType", `
-        "Description", "managingCPM", "numberOfDaysRetention", "numberOfVersionsRetention"
-)
-$props | ForEach-Object {$SafeMembersList | Add-Member -MemberType NoteProperty -Name $_ -Value $null -Force}
-
-$SafeMembersList | ForEach-Object {
-    Write-Verbose "Working $($PSItem.MemberName) in safe $($PSItem.safeName)"
-
-    #User information
-    $_.Source = $_.userinfo.Source
-    $_.UserType = $_.userinfo.UserType
-
-    #Safe information
-    $_.ManagingCPM = $_.safeinfo.managingCPM
-    $_.Description = $_.safeinfo.Description
-    $_.NumberOfDaysRetention = $_.safeinfo.NumberOfDaysRetention
-    $_.NumberOfVersionsRetention = $_.safeinfo.NumberOfVersionsRetention
-
+if (-not $SafeMembersList -or $SafeMembersList.Count -eq 0) {
+    Log 'No safe members found — expand search parameters and try again.' WARNING
+    return
 }
 
-[array]$ReportProps = @("Username", "Source", "MemberType", "UserType", "SafeName", "Description", "managingCPM", "numberOfDaysRetention", "numberOfVersionsRetention")
+$props = @("Source", "UserType", "Description", "ManagingCPM", "NumberOfDaysRetention", "NumberOfVersionsRetention")
+$props | ForEach-Object { $SafeMembersList | Add-Member -MemberType NoteProperty -Name $_ -Value $null -Force }
 
-IF (!$HidePerms) {
-    If ([string]::IsNullOrEmpty($PermList)) {
-        [array]$outputProps = $ReportProps + $($(($SafeMembersList.permissions | Get-Member | Where-Object MemberType -EQ "NoteProperty").name) |Where-Object {$PSItem -notIn $ReportProps})
+Log "Processing Safe Members..." "INFO" $true
+$SafeMembersList | ForEach-Object {    
+    try {
+        $_.Source = $_.UserInfo.Source
+        $_.UserType = $_.UserInfo.UserType
+        $_.ManagingCPM = $_.SafeInfo.ManagingCPM
+        $_.Description = $_.SafeInfo.Description
+        $_.NumberOfDaysRetention = $_.SafeInfo.NumberOfDaysRetention
+        $_.NumberOfVersionsRetention = $_.SafeInfo.NumberOfVersionsRetention        
+    } catch {
+        Write-Host""
+        Log "$($_.Exception.Message)" "ERROR"
+    }
+}
+Write-Host "Done" -ForegroundColor Green
+
+Log "Expanding Group Members..." "INFO" $true
+$ExpandedGroupMembers = @()
+foreach ($groupMember in $SafeMembersList | Where-Object { $_.MemberType -eq "Group" }) {
+    try {
+        $groupUsers = Get-PASGroup -id $groupMember.memberId -includeMembers $true -ErrorAction SilentlyContinue
+        foreach ($user in $groupUsers.members) {
+            if (!$groupMember.memberType -eq "Group") {
+                $UserInfo = Get-PASUser -id $user.id
+            }
+            $expanded = [PSCustomObject]@{
+                Username   = $user.username
+                Source     = $UserInfo.source
+                MemberType = $UserInfo.userType
+                UserType   = $user.UserType
+                SafeName   = $groupMember.SafeName
+                Description = $groupMember.SafeInfo.Description
+                ManagingCPM = $groupMember.SafeInfo.ManagingCPM
+                NumberOfDaysRetention = $groupMember.SafeInfo.NumberOfDaysRetention
+                NumberOfVersionsRetention = $groupMember.SafeInfo.NumberOfVersionsRetention
+                Permissions = $groupMember.Permissions
+            }
+            $ExpandedGroupMembers += $expanded
+        }
+        #Log "Expanded group '$($groupMember.UserName)' in Safe '$($groupMember.SafeName)'" "SUCCESS"
+    } catch {
+        Write-Host ""
+        Log "Failed to expand group '$($groupMember.UserName)' in Safe '$($groupMember.SafeName)'" "WARNING"
+    }
+}
+Write-Host "Done" -ForegroundColor Green
+
+$SafeMembersList += $ExpandedGroupMembers
+
+[array]$ReportProps = @("Username", "Source", "MemberType", "UserType", "SafeName", "Description", "ManagingCPM", "NumberOfDaysRetention", "NumberOfVersionsRetention")
+
+if (-not $HidePerms) {
+    if ($PermList) {
+        Log "Collecting permission properties..." "INFO" $true
+        $permProps = $SafeMembersList |
+            ForEach-Object { $_.Permissions.PSObject.Properties.Name } |
+            Select-Object -Unique |
+            Where-Object { $_ -is [string] -and $_ -notin $ReportProps }
+        Write-Host "Done" -ForegroundColor Green
+        [array]$outputProps = $ReportProps + $permProps
     } else {
         [array]$outputProps = $ReportProps + $PermList
-    } 
+    }
 } else {
     [array]$outputProps = $ReportProps
 }
 
-$SafeMembersList | `
-Select-Object -Property $ReportProps -ExpandProperty permissions |`
-Select-Object -Property $outputProps | `
-Sort-Object -Property username, safename |`
-Export-Csv $ReportPath -NoTypeInformation
+Write-Host "`nExporting the following columns to CSV:" -ForegroundColor Cyan
+$outputProps | ForEach-Object { Write-Host " - $_" }
+
+Log "Exporting Safe Member data to $ReportPath..." INFO $true
+try {
+    $exportData = @()
+    foreach ($member in $SafeMembersList) {
+        $obj = @{}
+        foreach ($prop in $ReportProps) {
+            $obj[$prop] = $member.$prop
+        }
+        if ($member.Permissions -and $member.Permissions.PSObject.Properties.Count -gt 0) {
+            foreach ($perm in $member.Permissions.PSObject.Properties) {
+                $obj[$perm.Name] = "$($perm.Value)"
+            }
+        }
+        $exportData += [PSCustomObject]$obj
+    }
+
+    $validProps = @()
+    foreach ($prop in $outputProps) {
+        if ($exportData[0].PSObject.Properties.Name -contains $prop) {
+            $validProps += $prop
+        } else {
+            Write-Host ""
+            Log "Property '$prop' not found in export data" WARNING
+        }
+    }
+
+    $exportData |
+        Select-Object -Property $validProps |
+        Sort-Object -Property Username, SafeName |
+        Export-Csv -Path $ReportPath -NoTypeInformation -Encoding UTF8
+
+    Write-Host "Done" -ForegroundColor Green
+    Log "Report saved to $ReportPath" "SUCCESS"
+} catch {
+    Log "Failed to export CSV: $($_.Exception.Message)" "ERROR"
+}
+
+Log "=== Script completed successfully ===" "SUCCESS"
